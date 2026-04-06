@@ -1,0 +1,21 @@
+{
+  "name": "script-delete-imageskit",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.101.1",
+    "axios": "^1.14.0",
+    "body-parser": "^2.2.2",
+    "dotenv": "^16.6.1",
+    "express": "^5.2.1",
+    "imagekit": "^6.0.0"
+  }
+}
