@@ -16,7 +16,7 @@ const imagekit = new ImageKit({
 // Supabase setup
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
+  process.env.SUPABASE_SERVICE_ROLE_KEY,
 );
 
 const PAGE_SIZE = 100; // Number of files to fetch per page
@@ -31,7 +31,9 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const deleteBatch = async (fileIds) => {
   if (dryRun) {
-    console.log(`[DRY RUN] Would delete ${fileIds.length} files from ImageKit.`);
+    console.log(
+      `[DRY RUN] Would delete ${fileIds.length} files from ImageKit.`,
+    );
     return;
   }
 
@@ -73,7 +75,8 @@ const deleteAllFiles = async () => {
         } catch (error) {
           const status = error?.$ResponseMetadata?.statusCode;
           const resetMs =
-            Number(error?.$ResponseMetadata?.headers?.["x-ratelimit-reset"]) || 0;
+            Number(error?.$ResponseMetadata?.headers?.["x-ratelimit-reset"]) ||
+            0;
 
           if (status === 429 && resetMs > 0) {
             console.log(`Rate limited. Waiting ${resetMs}ms...`);
@@ -86,15 +89,15 @@ const deleteAllFiles = async () => {
     }
 
     offset += PAGE_SIZE;
-    
   }
 
   // Reset total_uploaded counter in Supabase after all files are deleted
   if (!dryRun && totalDeleted > 0) {
-    const { error } = await supabase
+    const { data, error } = await supabase
       .from(SUPABASE_TABLE)
       .update({ total_uploaded: 1024 })
-      .gt('id', 15); // Matches all rows with id > 0
+      .eq("id", 15)
+      .select();
 
     if (error) {
       console.error("[Supabase] Update error:", error.message);
@@ -114,7 +117,8 @@ app.post("/api/delete-imagekit", async (req, res) => {
   if (confirm !== "YES") {
     return res.status(403).json({
       success: false,
-      error: "Refusing to delete. Set CONFIRM_DELETE_ALL_IMAGEKIT=YES to enable.",
+      error:
+        "Refusing to delete. Set CONFIRM_DELETE_ALL_IMAGEKIT=YES to enable.",
     });
   }
 
@@ -123,7 +127,9 @@ app.post("/api/delete-imagekit", async (req, res) => {
     res.json({ success: true, message: result });
   } catch (error) {
     console.error("Delete-all failed:", error);
-    res.status(500).json({ success: false, error: error.message || error.toString() });
+    res
+      .status(500)
+      .json({ success: false, error: error.message || error.toString() });
   }
 });
 
