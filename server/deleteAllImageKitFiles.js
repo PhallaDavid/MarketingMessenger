@@ -6,33 +6,102 @@ import { createClient } from "@supabase/supabase-js";
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ImageKit setup
-const imagekit = new ImageKit({
-  publicKey: process.env.IMAGEKIT_PUBLIC_KEY,
-  privateKey: process.env.IMAGEKIT_PRIVATE_KEY,
-  urlEndpoint: process.env.IMAGEKIT_URL_ENDPOINT,
-});
-
-// Supabase setup
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY,
-);
-
-const PAGE_SIZE = 100; // Number of files to fetch per page
-const DELETE_BATCH = 100; // Number of files to delete per batch
-const dryRun = process.env.IMAGEKIT_DELETE_DRY_RUN === "1";
-const LIMIT_PAGES = Number(process.env.LIMIT_PAGES) || 0; // Limit number of pages to process (0 = unlimited)
-
-// Supabase table configuration - customize to match your database schema
-const SUPABASE_TABLE = process.env.SUPABASE_TABLE || "images";
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const deleteBatch = async (fileIds) => {
+/**
+ * Extracts configuration from query parameters, request body, or falls back to process.env
+ */
+const getConfig = (req) => {
+  const query = req.query || {};
+  const body = req.body || {};
+
+  const publicKey =
+    query.IMAGEKIT_PUBLIC_KEY ||
+    query.publicKey ||
+    body.IMAGEKIT_PUBLIC_KEY ||
+    body.publicKey ||
+    process.env.IMAGEKIT_PUBLIC_KEY ||
+    "public_dummy_key";
+
+  const privateKey =
+    query.IMAGEKIT_PRIVATE_KEY ||
+    query.privateKey ||
+    body.IMAGEKIT_PRIVATE_KEY ||
+    body.privateKey ||
+    process.env.IMAGEKIT_PRIVATE_KEY;
+
+  const urlEndpoint =
+    query.IMAGEKIT_URL_ENDPOINT ||
+    query.urlEndpoint ||
+    body.IMAGEKIT_URL_ENDPOINT ||
+    body.urlEndpoint ||
+    process.env.IMAGEKIT_URL_ENDPOINT;
+
+  const supabaseUrl =
+    query.SUPABASE_URL ||
+    query.supabaseUrl ||
+    body.SUPABASE_URL ||
+    body.supabaseUrl ||
+    process.env.SUPABASE_URL;
+
+  const supabaseKey =
+    query.SUPABASE_SERVICE_ROLE_KEY ||
+    query.supabaseServiceRoleKey ||
+    query.supabaseKey ||
+    body.SUPABASE_SERVICE_ROLE_KEY ||
+    body.supabaseServiceRoleKey ||
+    body.supabaseKey ||
+    process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  const supabaseTable =
+    query.SUPABASE_TABLE ||
+    query.supabaseTable ||
+    body.SUPABASE_TABLE ||
+    body.supabaseTable ||
+    process.env.SUPABASE_TABLE ||
+    "imagekits";
+
+  const confirmRaw =
+    query.CONFIRM_DELETE_ALL_IMAGEKIT ||
+    query.confirm ||
+    body.CONFIRM_DELETE_ALL_IMAGEKIT ||
+    body.confirm ||
+    process.env.CONFIRM_DELETE_ALL_IMAGEKIT;
+
+  const dryRunRaw =
+    query.IMAGEKIT_DELETE_DRY_RUN ??
+    query.dryRun ??
+    body.IMAGEKIT_DELETE_DRY_RUN ??
+    body.dryRun ??
+    process.env.IMAGEKIT_DELETE_DRY_RUN;
+
+  const dryRun =
+    dryRunRaw === "1" ||
+    dryRunRaw === "true" ||
+    dryRunRaw === true;
+
+  const confirm =
+    typeof confirmRaw === "string" ? confirmRaw.trim().toUpperCase() : confirmRaw;
+
+  return {
+    publicKey,
+    privateKey,
+    urlEndpoint,
+    supabaseUrl,
+    supabaseKey,
+    supabaseTable,
+    confirm,
+    dryRun,
+  };
+};
+
+const deleteBatch = async (imagekit, fileIds, dryRun) => {
   if (dryRun) {
     console.log(
-      `[DRY RUN] Would delete ${fileIds.length} files from ImageKit.`,
+      `[DRY RUN] Would delete ${fileIds.length} files from ImageKit.`
     );
     return;
   }
@@ -42,7 +111,31 @@ const deleteBatch = async (fileIds) => {
   console.log(`[ImageKit] Deleted ${fileIds.length} files.`);
 };
 
-const deleteAllFiles = async () => {
+const deleteAllFiles = async (config) => {
+  const {
+    publicKey,
+    privateKey,
+    urlEndpoint,
+    supabaseUrl,
+    supabaseKey,
+    supabaseTable,
+    dryRun,
+  } = config;
+
+  if (!privateKey || !urlEndpoint) {
+    throw new Error(
+      "Missing ImageKit credentials. Please provide IMAGEKIT_PRIVATE_KEY and IMAGEKIT_URL_ENDPOINT via URL query parameters, body payload, or .env file."
+    );
+  }
+
+  const imagekit = new ImageKit({
+    publicKey: publicKey || "",
+    privateKey: privateKey,
+    urlEndpoint: urlEndpoint,
+  });
+
+  const PAGE_SIZE = 100;
+  const DELETE_BATCH = 100;
   let totalDeleted = 0;
   let offset = 0;
 
@@ -52,10 +145,9 @@ const deleteAllFiles = async () => {
       limit: PAGE_SIZE,
     });
 
-    // Support both response formats
     const files = Array.isArray(filesResponse)
       ? filesResponse
-      : filesResponse.items || [];
+      : filesResponse?.items || [];
 
     console.log(`Offset ${offset}: Found ${files.length} files.`);
 
@@ -69,7 +161,7 @@ const deleteAllFiles = async () => {
 
       while (!done) {
         try {
-          await deleteBatch(chunk);
+          await deleteBatch(imagekit, chunk, dryRun);
           totalDeleted += chunk.length;
           done = true;
         } catch (error) {
@@ -91,47 +183,63 @@ const deleteAllFiles = async () => {
     offset += PAGE_SIZE;
   }
 
-  // Reset total_uploaded counter in Supabase after all files are deleted
-  if (!dryRun && totalDeleted > 0) {
-    const { data, error } = await supabase
-      .from(SUPABASE_TABLE)
-      .update({ total_uploaded: 1024 })
-      .eq("id", 15)
-      .select();
+  // Reset total_uploaded counter in Supabase after files are processed
+  if (!dryRun && totalDeleted > 0 && supabaseUrl && supabaseKey) {
+    try {
+      const supabase = createClient(supabaseUrl, supabaseKey);
+      const { error } = await supabase
+        .from(supabaseTable)
+        .update({ total_uploaded: 0 })
+        .eq("id", 15)
+        .select();
 
-    if (error) {
-      console.error("[Supabase] Update error:", error.message);
-      throw new Error(`Supabase update failed: ${error.message}`);
+      if (error) {
+        console.error("[Supabase] Update error:", error.message);
+      } else {
+        console.log("[Supabase] Reset total_uploaded to 0.");
+      }
+    } catch (err) {
+      console.error("[Supabase] Supabase update skipped/failed:", err.message);
     }
-
-    console.log("[Supabase] Reset total_uploaded to 0.");
   }
 
   return dryRun
-    ? "Dry run complete. No files were deleted."
+    ? `Dry run complete. Found ${totalDeleted} files in ImageKit. No files were deleted.`
     : `All done. Total ImageKit files deleted: ${totalDeleted}.`;
 };
 
-app.post("/api/delete-imagekit", async (req, res) => {
-  const confirm = process.env.CONFIRM_DELETE_ALL_IMAGEKIT;
-  if (confirm !== "YES") {
+const handleDeleteRequest = async (req, res) => {
+  const config = getConfig(req);
+
+  if (config.confirm !== "YES") {
     return res.status(403).json({
       success: false,
       error:
-        "Refusing to delete. Set CONFIRM_DELETE_ALL_IMAGEKIT=YES to enable.",
+        "Refusing to delete. Set CONFIRM_DELETE_ALL_IMAGEKIT=YES (or ?confirm=YES) in your URL parameters, body, or .env file to enable.",
     });
   }
 
   try {
-    const result = await deleteAllFiles();
-    res.json({ success: true, message: result });
+    const result = await deleteAllFiles(config);
+    res.json({
+      success: true,
+      message: result,
+      options: {
+        dryRun: config.dryRun,
+        supabaseTable: config.supabaseTable,
+      },
+    });
   } catch (error) {
     console.error("Delete-all failed:", error);
     res
       .status(500)
       .json({ success: false, error: error.message || error.toString() });
   }
-});
+};
+
+// Handle GET and POST requests on root / and /api/delete-imagekit
+app.all("/api/delete-imagekit", handleDeleteRequest);
+app.all("/", handleDeleteRequest);
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
