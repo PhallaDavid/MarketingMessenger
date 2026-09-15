@@ -21,10 +21,12 @@ const getConfig = (req) => {
   const publicKey =
     query.IMAGEKIT_PUBLIC_KEY ||
     query.publicKey ||
+    query.public_key ||
     body.IMAGEKIT_PUBLIC_KEY ||
     body.publicKey ||
+    body.public_key ||
     process.env.IMAGEKIT_PUBLIC_KEY ||
-    "public_dummy_key";
+    "public_5MQz6ok1zqGrfmTPr1bD7wps+qc=";
 
   const privateKey =
     query.IMAGEKIT_PRIVATE_KEY ||
@@ -86,6 +88,21 @@ const getConfig = (req) => {
   const confirm =
     typeof confirmRaw === "string" ? confirmRaw.trim().toUpperCase() : confirmRaw;
 
+  const keepDaysRaw =
+    query.keepDays ??
+    query.KEEP_DAYS ??
+    query.keepLastDay ??
+    body.keepDays ??
+    body.KEEP_DAYS ??
+    body.keepLastDay ??
+    process.env.KEEP_DAYS;
+
+  // Default keepDays to 1 if not specified (or set to 0 to delete everything)
+  const keepDays =
+    keepDaysRaw !== undefined && keepDaysRaw !== null
+      ? Number(keepDaysRaw)
+      : 1;
+
   return {
     publicKey,
     privateKey,
@@ -95,6 +112,7 @@ const getConfig = (req) => {
     supabaseTable,
     confirm,
     dryRun,
+    keepDays,
   };
 };
 
@@ -120,6 +138,7 @@ const deleteAllFiles = async (config) => {
     supabaseKey,
     supabaseTable,
     dryRun,
+    keepDays,
   } = config;
 
   if (!privateKey || !urlEndpoint) {
@@ -137,7 +156,12 @@ const deleteAllFiles = async (config) => {
   const PAGE_SIZE = 100;
   const DELETE_BATCH = 100;
   let totalDeleted = 0;
+  let totalKept = 0;
   let offset = 0;
+
+  const now = Date.now();
+  const cutoffTime =
+    keepDays > 0 ? now - keepDays * 24 * 60 * 60 * 1000 : null;
 
   while (true) {
     const filesResponse = await imagekit.listFiles({
@@ -153,10 +177,28 @@ const deleteAllFiles = async (config) => {
 
     if (files.length === 0) break;
 
-    const fileIds = files.map((f) => f.fileId).filter(Boolean);
+    let filesToDelete = [];
+    let filesToKeep = [];
 
-    for (let i = 0; i < fileIds.length; i += DELETE_BATCH) {
-      const chunk = fileIds.slice(i, i + DELETE_BATCH);
+    if (cutoffTime) {
+      for (const f of files) {
+        const fileTime = new Date(f.createdAt).getTime();
+        if (fileTime >= cutoffTime) {
+          filesToKeep.push(f);
+        } else {
+          filesToDelete.push(f);
+        }
+      }
+    } else {
+      filesToDelete = files;
+    }
+
+    totalKept += filesToKeep.length;
+
+    const fileIdsToDelete = filesToDelete.map((f) => f.fileId).filter(Boolean);
+
+    for (let i = 0; i < fileIdsToDelete.length; i += DELETE_BATCH) {
+      const chunk = fileIdsToDelete.slice(i, i + DELETE_BATCH);
       let done = false;
 
       while (!done) {
@@ -180,32 +222,44 @@ const deleteAllFiles = async (config) => {
       }
     }
 
-    offset += PAGE_SIZE;
+    if (dryRun) {
+      offset += PAGE_SIZE;
+    } else {
+      // Advance offset only by the count of files kept (since deleted files disappear from ImageKit index)
+      offset += filesToKeep.length;
+    }
   }
 
-  // Reset total_uploaded counter in Supabase after files are processed
+  // Update total_uploaded counter in Supabase after files are processed
   if (!dryRun && totalDeleted > 0 && supabaseUrl && supabaseKey) {
     try {
       const supabase = createClient(supabaseUrl, supabaseKey);
       const { error } = await supabase
         .from(supabaseTable)
-        .update({ total_uploaded: 0 })
+        .update({ total_uploaded: totalKept })
         .eq("id", 15)
         .select();
 
       if (error) {
         console.error("[Supabase] Update error:", error.message);
       } else {
-        console.log("[Supabase] Reset total_uploaded to 0.");
+        console.log(`[Supabase] Reset total_uploaded to ${totalKept}.`);
       }
     } catch (err) {
       console.error("[Supabase] Supabase update skipped/failed:", err.message);
     }
   }
 
-  return dryRun
-    ? `Dry run complete. Found ${totalDeleted} files in ImageKit. No files were deleted.`
-    : `All done. Total ImageKit files deleted: ${totalDeleted}.`;
+  const modeStr = dryRun ? "Dry run complete." : "All done.";
+  const keepStr =
+    keepDays > 0
+      ? ` Kept ${totalKept} files from the last ${keepDays} day(s).`
+      : "";
+  const actionStr = dryRun
+    ? `Would delete ${totalDeleted} files older than ${keepDays} day(s).`
+    : `Total ImageKit files deleted: ${totalDeleted}.`;
+
+  return `${modeStr} ${actionStr}${keepStr}`;
 };
 
 const handleDeleteRequest = async (req, res) => {
@@ -226,6 +280,7 @@ const handleDeleteRequest = async (req, res) => {
       message: result,
       options: {
         dryRun: config.dryRun,
+        keepDays: config.keepDays,
         supabaseTable: config.supabaseTable,
       },
     });
