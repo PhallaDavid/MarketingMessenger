@@ -202,6 +202,9 @@ const deleteAllFiles = async (config) => {
   const cutoffTime =
     keepHours > 0 ? now - keepHours * 60 * 60 * 1000 : null;
 
+  const seenFileIds = new Set();
+  let consecutiveEmptyPages = 0;
+
   while (true) {
     const filesResponse = await imagekit.listFiles({
       skip: offset,
@@ -216,11 +219,29 @@ const deleteAllFiles = async (config) => {
 
     if (files.length === 0) break;
 
+    // Filter out files that have already been processed in previous iterations
+    const newFiles = files.filter((f) => f.fileId && !seenFileIds.has(f.fileId));
+
+    if (newFiles.length === 0) {
+      consecutiveEmptyPages++;
+      offset += PAGE_SIZE;
+      if (consecutiveEmptyPages >= 3) {
+        console.log(`No new unprocessed files found across consecutive pages. Finished pagination.`);
+        break;
+      }
+      continue;
+    }
+
+    consecutiveEmptyPages = 0;
+    for (const f of newFiles) {
+      seenFileIds.add(f.fileId);
+    }
+
     let filesToDelete = [];
     let filesToKeep = [];
 
     if (cutoffTime) {
-      for (const f of files) {
+      for (const f of newFiles) {
         const fileTime = new Date(f.createdAt).getTime();
         if (fileTime >= cutoffTime) {
           filesToKeep.push(f);
@@ -229,7 +250,7 @@ const deleteAllFiles = async (config) => {
         }
       }
     } else {
-      filesToDelete = files;
+      filesToDelete = newFiles;
     }
 
     totalKept += filesToKeep.length;
@@ -264,8 +285,8 @@ const deleteAllFiles = async (config) => {
     if (dryRun) {
       offset += PAGE_SIZE;
     } else {
-      // Advance offset only by the count of files kept (since deleted files disappear from ImageKit index)
-      offset += filesToKeep.length;
+      // Advance offset by count of kept files. If no files were kept in this page, advance by PAGE_SIZE to ensure we never stall.
+      offset += filesToKeep.length > 0 ? filesToKeep.length : PAGE_SIZE;
     }
   }
 
