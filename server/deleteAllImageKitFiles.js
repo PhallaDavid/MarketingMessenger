@@ -360,6 +360,76 @@ const handleDeleteRequest = async (req, res) => {
   }
 };
 
+const handleGetImagesRequest = async (req, res) => {
+  const config = getConfig(req);
+  const { publicKey, privateKey, urlEndpoint } = config;
+
+  if (!privateKey || !urlEndpoint) {
+    return res.status(400).json({
+      success: false,
+      error:
+        "Missing ImageKit credentials. Please provide IMAGEKIT_PRIVATE_KEY and IMAGEKIT_URL_ENDPOINT via URL query parameters or .env file.",
+    });
+  }
+
+  try {
+    const imagekit = new ImageKit({
+      publicKey: publicKey || "",
+      privateKey: privateKey,
+      urlEndpoint: urlEndpoint,
+    });
+
+    const PAGE_SIZE = 100;
+    let allFiles = [];
+    let offset = Number(req.query.skip || 0);
+    const requestedLimit = req.query.limit ? Number(req.query.limit) : null;
+
+    while (true) {
+      const fetchLimit = requestedLimit
+        ? Math.min(PAGE_SIZE, requestedLimit - allFiles.length)
+        : PAGE_SIZE;
+
+      if (fetchLimit <= 0) break;
+
+      const filesResponse = await imagekit.listFiles({
+        skip: offset,
+        limit: fetchLimit,
+      });
+
+      const files = Array.isArray(filesResponse)
+        ? filesResponse
+        : filesResponse?.items || [];
+
+      if (files.length === 0) break;
+
+      allFiles.push(...files);
+      offset += files.length;
+
+      if (
+        files.length < fetchLimit ||
+        (requestedLimit && allFiles.length >= requestedLimit)
+      ) {
+        break;
+      }
+    }
+
+    res.json({
+      success: true,
+      total: allFiles.length,
+      files: allFiles,
+    });
+  } catch (error) {
+    console.error("Get images failed:", error);
+    res
+      .status(500)
+      .json({ success: false, error: error.message || error.toString() });
+  }
+};
+
+// API endpoints to retrieve all images
+app.all("/api/get-images", handleGetImagesRequest);
+app.all("/api/images", handleGetImagesRequest);
+
 // Handle GET and POST requests on root / and /api/delete-imagekit
 app.all("/api/delete-imagekit", handleDeleteRequest);
 app.all("/", handleDeleteRequest);
