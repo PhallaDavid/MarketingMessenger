@@ -12,72 +12,53 @@ app.use(express.urlencoded({ extended: true }));
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
- * Extracts configuration from query parameters, request body, or falls back to process.env
+ * Extracts configuration from URL query parameters, falling back to process.env
  */
 const getConfig = (req) => {
   const query = req.query || {};
-  const body = req.body || {};
 
   const publicKey =
     query.IMAGEKIT_PUBLIC_KEY ||
     query.publicKey ||
     query.public_key ||
-    body.IMAGEKIT_PUBLIC_KEY ||
-    body.publicKey ||
-    body.public_key ||
     process.env.IMAGEKIT_PUBLIC_KEY ||
     "public_5MQz6ok1zqGrfmTPr1bD7wps+qc=";
 
   const privateKey =
     query.IMAGEKIT_PRIVATE_KEY ||
     query.privateKey ||
-    body.IMAGEKIT_PRIVATE_KEY ||
-    body.privateKey ||
     process.env.IMAGEKIT_PRIVATE_KEY;
 
   const urlEndpoint =
     query.IMAGEKIT_URL_ENDPOINT ||
     query.urlEndpoint ||
-    body.IMAGEKIT_URL_ENDPOINT ||
-    body.urlEndpoint ||
     process.env.IMAGEKIT_URL_ENDPOINT;
 
   const supabaseUrl =
     query.SUPABASE_URL ||
     query.supabaseUrl ||
-    body.SUPABASE_URL ||
-    body.supabaseUrl ||
     process.env.SUPABASE_URL;
 
   const supabaseKey =
     query.SUPABASE_SERVICE_ROLE_KEY ||
     query.supabaseServiceRoleKey ||
     query.supabaseKey ||
-    body.SUPABASE_SERVICE_ROLE_KEY ||
-    body.supabaseServiceRoleKey ||
-    body.supabaseKey ||
     process.env.SUPABASE_SERVICE_ROLE_KEY;
 
   const supabaseTable =
     query.SUPABASE_TABLE ||
     query.supabaseTable ||
-    body.SUPABASE_TABLE ||
-    body.supabaseTable ||
     process.env.SUPABASE_TABLE ||
     "imagekits";
 
   const confirmRaw =
     query.CONFIRM_DELETE_ALL_IMAGEKIT ||
     query.confirm ||
-    body.CONFIRM_DELETE_ALL_IMAGEKIT ||
-    body.confirm ||
     process.env.CONFIRM_DELETE_ALL_IMAGEKIT;
 
   const dryRunRaw =
     query.IMAGEKIT_DELETE_DRY_RUN ??
     query.dryRun ??
-    body.IMAGEKIT_DELETE_DRY_RUN ??
-    body.dryRun ??
     process.env.IMAGEKIT_DELETE_DRY_RUN;
 
   const dryRun =
@@ -88,20 +69,35 @@ const getConfig = (req) => {
   const confirm =
     typeof confirmRaw === "string" ? confirmRaw.trim().toUpperCase() : confirmRaw;
 
+  const keepHoursRaw =
+    query.keepHours ??
+    query.KEEP_HOURS ??
+    query.keepLastHours ??
+    query.keepLastHour ??
+    query.keepHour ??
+    query.hours ??
+    process.env.KEEP_HOURS;
+
   const keepDaysRaw =
     query.keepDays ??
     query.KEEP_DAYS ??
+    query.keepLastDays ??
     query.keepLastDay ??
-    body.keepDays ??
-    body.KEEP_DAYS ??
-    body.keepLastDay ??
+    query.keepDay ??
+    query.days ??
     process.env.KEEP_DAYS;
 
-  // Default keepDays to 1 if not specified (or set to 0 to delete everything)
-  const keepDays =
-    keepDaysRaw !== undefined && keepDaysRaw !== null
-      ? Number(keepDaysRaw)
-      : 1;
+  let keepHours;
+  if (keepHoursRaw !== undefined && keepHoursRaw !== null && keepHoursRaw !== "") {
+    keepHours = Number(keepHoursRaw);
+  } else if (keepDaysRaw !== undefined && keepDaysRaw !== null && keepDaysRaw !== "") {
+    keepHours = Number(keepDaysRaw) * 24;
+  } else {
+    // Default to 24 hours (1 day) if not specified
+    keepHours = 24;
+  }
+
+  const keepDays = keepHours / 24;
 
   return {
     publicKey,
@@ -112,6 +108,7 @@ const getConfig = (req) => {
     supabaseTable,
     confirm,
     dryRun,
+    keepHours,
     keepDays,
   };
 };
@@ -138,12 +135,13 @@ const deleteAllFiles = async (config) => {
     supabaseKey,
     supabaseTable,
     dryRun,
+    keepHours,
     keepDays,
   } = config;
 
   if (!privateKey || !urlEndpoint) {
     throw new Error(
-      "Missing ImageKit credentials. Please provide IMAGEKIT_PRIVATE_KEY and IMAGEKIT_URL_ENDPOINT via URL query parameters, body payload, or .env file."
+      "Missing ImageKit credentials. Please provide IMAGEKIT_PRIVATE_KEY and IMAGEKIT_URL_ENDPOINT via URL query parameters or .env file."
     );
   }
 
@@ -161,7 +159,7 @@ const deleteAllFiles = async (config) => {
 
   const now = Date.now();
   const cutoffTime =
-    keepDays > 0 ? now - keepDays * 24 * 60 * 60 * 1000 : null;
+    keepHours > 0 ? now - keepHours * 60 * 60 * 1000 : null;
 
   while (true) {
     const filesResponse = await imagekit.listFiles({
@@ -251,12 +249,19 @@ const deleteAllFiles = async (config) => {
   }
 
   const modeStr = dryRun ? "Dry run complete." : "All done.";
+  const timeUnitStr =
+    keepHours > 0
+      ? keepHours % 24 === 0
+        ? `${keepHours} hour(s) (${keepHours / 24} day(s))`
+        : `${keepHours} hour(s)`
+      : "";
+
   const keepStr =
-    keepDays > 0
-      ? ` Kept ${totalKept} files from the last ${keepDays} day(s).`
+    keepHours > 0
+      ? ` Kept ${totalKept} files from the last ${timeUnitStr}.`
       : "";
   const actionStr = dryRun
-    ? `Would delete ${totalDeleted} files older than ${keepDays} day(s).`
+    ? `Would delete ${totalDeleted} files${timeUnitStr ? ` older than ${timeUnitStr}` : ""}.`
     : `Total ImageKit files deleted: ${totalDeleted}.`;
 
   return `${modeStr} ${actionStr}${keepStr}`;
@@ -269,7 +274,7 @@ const handleDeleteRequest = async (req, res) => {
     return res.status(403).json({
       success: false,
       error:
-        "Refusing to delete. Set CONFIRM_DELETE_ALL_IMAGEKIT=YES (or ?confirm=YES) in your URL parameters, body, or .env file to enable.",
+        "Refusing to delete. Set CONFIRM_DELETE_ALL_IMAGEKIT=YES (or ?confirm=YES) in your URL query parameters or .env file to enable.",
     });
   }
 
@@ -280,6 +285,7 @@ const handleDeleteRequest = async (req, res) => {
       message: result,
       options: {
         dryRun: config.dryRun,
+        keepHours: config.keepHours,
         keepDays: config.keepDays,
         supabaseTable: config.supabaseTable,
       },
