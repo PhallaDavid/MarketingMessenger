@@ -11,23 +11,33 @@ app.use(express.urlencoded({ extended: true }));
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+const cleanParam = (val) => {
+  if (typeof val === "string") {
+    // URL query string parsing converts '+' to ' ' if unencoded. Fix spaces back to '+' for base64/keys.
+    return val.trim().replace(/ /g, "+");
+  }
+  return val;
+};
+
 /**
  * Extracts configuration from URL query parameters, falling back to process.env
  */
 const getConfig = (req) => {
   const query = req.query || {};
 
-  const publicKey =
+  const publicKey = cleanParam(
     query.IMAGEKIT_PUBLIC_KEY ||
-    query.publicKey ||
-    query.public_key ||
-    process.env.IMAGEKIT_PUBLIC_KEY ||
-    "public_5MQz6ok1zqGrfmTPr1bD7wps+qc=";
+      query.publicKey ||
+      query.public_key ||
+      process.env.IMAGEKIT_PUBLIC_KEY ||
+      "public_5MQz6ok1zqGrfmTPr1bD7wps+qc="
+  );
 
-  const privateKey =
+  const privateKey = cleanParam(
     query.IMAGEKIT_PRIVATE_KEY ||
-    query.privateKey ||
-    process.env.IMAGEKIT_PRIVATE_KEY;
+      query.privateKey ||
+      process.env.IMAGEKIT_PRIVATE_KEY
+  );
 
   const urlEndpoint =
     query.IMAGEKIT_URL_ENDPOINT ||
@@ -122,8 +132,39 @@ const deleteBatch = async (imagekit, fileIds, dryRun) => {
   }
 
   // Delete from ImageKit
-  await imagekit.bulkDeleteFiles(fileIds);
-  console.log(`[ImageKit] Deleted ${fileIds.length} files.`);
+  try {
+    await imagekit.bulkDeleteFiles(fileIds);
+    console.log(`[ImageKit] Bulk deleted ${fileIds.length} files.`);
+  } catch (err) {
+    const errMsg = err?.message || err?.toString() || "";
+    const isMissingFileErr =
+      errMsg.includes("does not exist") ||
+      err?.$ResponseMetadata?.statusCode === 404;
+
+    if (isMissingFileErr) {
+      console.log(
+        `[ImageKit] Bulk delete encountered missing/already-deleted file(s). Deleting individually...`
+      );
+      for (const fileId of fileIds) {
+        try {
+          await imagekit.deleteFile(fileId);
+        } catch (singleErr) {
+          const sMsg = singleErr?.message || singleErr?.toString() || "";
+          if (
+            !sMsg.includes("does not exist") &&
+            singleErr?.$ResponseMetadata?.statusCode !== 404
+          ) {
+            console.warn(
+              `[ImageKit] Failed to delete individual file ${fileId}:`,
+              sMsg
+            );
+          }
+        }
+      }
+    } else {
+      throw err;
+    }
+  }
 };
 
 const deleteAllFiles = async (config) => {
